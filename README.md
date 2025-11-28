@@ -23,11 +23,12 @@ This prompt triggers the skill and asks for a YAML file containing the model ben
 
 ![](./runs-skill-v1/pass_rate_by_model.png)
 
-Some notes:
+Some notes and known limitations:
 
  - The skills repo is reset after each run in case an agent pollutes the directory
  - We don't keep this directory clean, so there is potential for interference or discovering previous run data.
  - The HF MCP Server is included in context with the `skills` bouquet - so model/dataset search, repo details, jobs and docs are made available.
  - AGENTS.md is used to inform the agent that `uv` is in use, and that huggingface_hub is installed. The `.venv` isn't reset every time either, so one run installing a heavy package will pay a time penalty - might be worth checking if that's a concern.
  - To check that, all the conversations are easily parseable/grepable. 
- - The results were regraded to take in to account specific benchmark metric assertions. That script is in the `dev` folder for reference.
+ - The results were *regraded* to take in to account specific benchmark metric assertions. That script is in the `dev` folder for reference.
+ - For the first run (and probably for the next few) I kept the markdown streaming renderer on for observation, so that may have a small impact on the timings. But that's the reason for the runs :) 
