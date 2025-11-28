@@ -32,3 +32,4 @@ Some notes and known limitations:
  - To check that, all the conversations are easily parseable/grepable. 
  - The results were *regraded* to take in to account specific benchmark metric assertions. That script is in the `dev` folder for reference.
  - For the first run (and probably for the next few) I kept the markdown streaming renderer on for observation, so that may have a small impact on the timings. But that's the reason for the runs :) 
+ - **WARNING** Make sure you commit changes to the skill folder _before_ running a test...
