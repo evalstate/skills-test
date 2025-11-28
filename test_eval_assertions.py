@@ -8,6 +8,7 @@ import sys
 import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterable
 
 
 @dataclass
@@ -20,13 +21,66 @@ class ValidationResult:
     benchmarks_found: list[str] = field(default_factory=list)
     error_message: str | None = None
 
+
+EXPECTED_METRICS: dict[str, float] = {
+    "arc_challenge": 48.5,
+    "arc_easy": 65.4,
+    "boolq": 73.4,
+    "copa": 90.0,
+    "hellaswag": 76.4,
+    "openbookqa": 50.2,
+    "piqa": 78.4,
+    "sciq": 93.8,
+    "winogrande": 67.9,
+    "mmlu": 28.3,
+    "truthfulqa": 36.0,
+}
+
+ALLOWED_MODEL_NAMES = {"OLMo-7B", "OLMo 7B"}
+
+# The base assertions cover structure, types, and safety checks.
+# We then add one assertion per expected metric value.
+BASE_ASSERTIONS = 12
+VALUE_ASSERTIONS = len(EXPECTED_METRICS)
+ASSERTIONS_TOTAL = BASE_ASSERTIONS + VALUE_ASSERTIONS
+
+
+def _normalize_model_name(name: str) -> str:
+    return name.replace("-", " ").strip().lower()
+
+
+def _normalize_metric_type(metric_type: str) -> str:
+    metric_type = metric_type.lower().replace(" ", "_")
+    metric_type = metric_type.replace("_(mc2)", "").replace("_(5_shot_mc)", "")
+    if "truthful" in metric_type:
+        return "truthfulqa"
+    if "mmlu" in metric_type:
+        return "mmlu"
+    return metric_type
+
+
+def _assert_metric_values(metrics: Iterable[dict], expected: dict[str, float]):
+    """Return a dict of normalized metric type -> value for validation."""
+    metric_map: dict[str, float] = {}
+    for m in metrics:
+        m_type = _normalize_metric_type(m["type"])
+        metric_map[m_type] = m["value"]
+    for metric, expected_value in expected.items():
+        assert metric in metric_map, f"Missing expected metric: {metric}"
+        assert metric_map[metric] == expected_value, (
+            f"Metric {metric} has value {metric_map[metric]}, expected {expected_value}"
+        )
+    return metric_map
+
 def validate_evaluation_file(
     output_file: Path,
     *,
     expected_model: str = "OLMo-7B",
+    allowed_model_names: set[str] | None = None,
     expected_source: str = "huggingface.co/allenai/OLMo-7B",
     min_expected_benchmarks: int = 9,
     expected_benchmarks: set[str] | None = None,
+    expected_metrics: dict[str, float] | None = None,
 ):
     """Validate an evaluation YAML file and raise on failure."""
     
@@ -45,7 +99,11 @@ def validate_evaluation_file(
     model_entry = data['model-index'][0]
     
     # Assertion 3: Model name is correct
-    assert model_entry['name'] == expected_model, f"Model name is '{model_entry['name']}', expected '{expected_model}'"
+    allowed_models = allowed_model_names or ALLOWED_MODEL_NAMES
+    model_name = model_entry['name']
+    normalized = _normalize_model_name(model_name)
+    normalized_expected = {_normalize_model_name(m) for m in allowed_models | {expected_model}}
+    assert normalized in normalized_expected, f"Model name is '{model_name}', expected one of {sorted(allowed_models | {expected_model})}"
     print("✓ Correct model name")
     
     # Assertion 4: Has results
@@ -64,22 +122,21 @@ def validate_evaluation_file(
     metrics = result['metrics']
     assert len(metrics) > 0, "Metrics list is empty"
     print(f"✓ Has {len(metrics)} metrics")
+
+    # Assertion 6b: Exact metric count
+    expected_metrics = expected_metrics or EXPECTED_METRICS
+    assert len(metrics) >= len(expected_metrics), (
+        f"Metrics list has {len(metrics)} entries, expected at least {len(expected_metrics)}"
+    )
+    print("✓ Metrics count meets expectation")
     
     # Assertion 7: Expected benchmark types
-    expected_benchmarks = expected_benchmarks or {
-        'arc_challenge', 'arc_easy', 'boolq', 'copa', 'hellaswag',
-        'openbookqa', 'piqa', 'sciq', 'winogrande', 'mmlu', 'truthfulqa'
-    }
+    expected_benchmarks = expected_benchmarks or set(expected_metrics.keys())
     
     # Extract metric types (normalize to handle variations)
     metric_types = set()
     for m in metrics:
-        metric_type = m['type'].lower().replace('_(mc2)', '').replace('_(5_shot_mc)', '').replace(' ', '_')
-        # Handle special cases
-        if 'truthful' in metric_type:
-            metric_type = 'truthfulqa'
-        if 'mmlu' in metric_type:
-            metric_type = 'mmlu'
+        metric_type = _normalize_metric_type(m['type'])
         metric_types.add(metric_type)
     
     found_benchmarks = expected_benchmarks & metric_types
@@ -114,6 +171,10 @@ def validate_evaluation_file(
         assert isinstance(m['value'], (int, float)), f"Metric {m['name']} value is not numeric"
         assert m['value'] > 0, f"Metric {m['name']} has invalid value: {m['value']}"
     print("✓ All metrics have valid numeric values")
+
+    # Assertion 11b: Exact metric values
+    metric_map = _assert_metric_values(metrics, expected_metrics)
+    print(f"✓ Metric values match expected scores for {len(metric_map)} metrics")
     
     # Assertion 11: Has source attribution
     assert 'source' in result, "Missing 'source' key"
@@ -141,9 +202,11 @@ def validate_with_metrics(
     output_file: Path,
     *,
     expected_model: str = "OLMo-7B",
+    allowed_model_names: set[str] | None = None,
     expected_source: str = "huggingface.co/allenai/OLMo-7B",
     min_expected_benchmarks: int = 9,
     expected_benchmarks: set[str] | None = None,
+    expected_metrics: dict[str, float] | None = None,
 ) -> ValidationResult:
     """Validate an evaluation YAML file and return structured metrics.
 
@@ -151,9 +214,12 @@ def validate_with_metrics(
     and returns a ValidationResult with pass/fail status and assertion counts.
     """
     assertions_passed = 0
-    assertions_total = 11  # Total number of assertions in validate_evaluation_file
+    assertions_total = ASSERTIONS_TOTAL
     metrics_count = 0
     benchmarks_found: list[str] = []
+    expected_metrics = expected_metrics or EXPECTED_METRICS
+    allowed_model_names = allowed_model_names or ALLOWED_MODEL_NAMES
+    expected_benchmarks = expected_benchmarks or set(expected_metrics.keys())
 
     try:
         # Check file exists (assertion 1)
@@ -187,14 +253,17 @@ def validate_with_metrics(
         model_entry = data['model-index'][0]
 
         # Assertion 3: Model name is correct
-        if model_entry.get('name') != expected_model:
+        model_name = model_entry.get('name', '')
+        normalized = _normalize_model_name(model_name)
+        normalized_expected = {_normalize_model_name(m) for m in allowed_model_names | {expected_model}}
+        if normalized not in normalized_expected:
             return ValidationResult(
                 passed=False,
                 assertions_passed=assertions_passed,
                 assertions_total=assertions_total,
                 metrics_count=0,
                 benchmarks_found=[],
-                error_message=f"Model name is '{model_entry.get('name')}', expected '{expected_model}'",
+                error_message=f"Model name is '{model_name}', expected one of {sorted(allowed_model_names | {expected_model})}",
             )
         assertions_passed += 1
 
@@ -239,19 +308,22 @@ def validate_with_metrics(
         metrics_count = len(metrics)
         assertions_passed += 1
 
-        # Assertion 7: Expected benchmark types
-        expected_benchmarks = expected_benchmarks or {
-            'arc_challenge', 'arc_easy', 'boolq', 'copa', 'hellaswag',
-            'openbookqa', 'piqa', 'sciq', 'winogrande', 'mmlu', 'truthfulqa'
-        }
+        # Assertion 6b: Exact metric count
+        if len(metrics) < len(expected_metrics):
+            return ValidationResult(
+                passed=False,
+                assertions_passed=assertions_passed,
+                assertions_total=assertions_total,
+                metrics_count=metrics_count,
+                benchmarks_found=[],
+                error_message=f"Metrics list has {len(metrics)} entries, expected at least {len(expected_metrics)}",
+            )
+        assertions_passed += 1
 
+        # Assertion 7: Expected benchmark types
         metric_types = set()
         for m in metrics:
-            metric_type = m['type'].lower().replace('_(mc2)', '').replace('_(5_shot_mc)', '').replace(' ', '_')
-            if 'truthful' in metric_type:
-                metric_type = 'truthfulqa'
-            if 'mmlu' in metric_type:
-                metric_type = 'mmlu'
+            metric_type = _normalize_metric_type(m['type'])
             metric_types.add(metric_type)
 
         found_benchmarks = expected_benchmarks & metric_types
@@ -336,6 +408,31 @@ def validate_with_metrics(
                     error_message=f"Metric {m.get('name')} has invalid value: {m['value']}",
                 )
         assertions_passed += 1
+
+        # Assertion 10b+: Exact metric values (one assertion per expected metric)
+        metric_map: dict[str, float] = {}
+        for m in metrics:
+            metric_map[_normalize_metric_type(m["type"])] = m["value"]
+        for metric, expected_value in expected_metrics.items():
+            if metric not in metric_map:
+                return ValidationResult(
+                    passed=False,
+                    assertions_passed=assertions_passed,
+                    assertions_total=assertions_total,
+                    metrics_count=metrics_count,
+                    benchmarks_found=benchmarks_found,
+                    error_message=f"Missing expected metric: {metric}",
+                )
+            if metric_map[metric] != expected_value:
+                return ValidationResult(
+                    passed=False,
+                    assertions_passed=assertions_passed,
+                    assertions_total=assertions_total,
+                    metrics_count=metrics_count,
+                    benchmarks_found=benchmarks_found,
+                    error_message=f"Metric {metric} has value {metric_map[metric]}, expected {expected_value}",
+                )
+            assertions_passed += 1
 
         # Assertion 11: Has source attribution
         if 'source' not in result or 'url' not in result.get('source', {}):

@@ -14,7 +14,11 @@ from pathlib import Path
 from fast_agent import FastAgent, ConversationSummary
 from fast_agent.mcp.prompts.prompt_load import load_prompt
 from fast_agent.mcp.prompt_serialization import save_messages
-from test_eval_assertions import validate_with_metrics, ValidationResult
+from test_eval_assertions import (
+    ASSERTIONS_TOTAL,
+    validate_with_metrics,
+    ValidationResult,
+)
 
 # Create the application
 fast = FastAgent("fast-agent example", ignore_unknown_args=True)
@@ -39,10 +43,13 @@ FIELDNAMES = [
     "execute_calls",
     "execute_errors",
     "error_message",
+    "llm_time_ms",
+    "tool_time_ms",
+    "turns",
 ]
 
 # Stable CSV path for accumulating results across batches
-CSV_PATH = Path("runs") / "results.csv"
+CSV_PATH = Path("runs") / "regraded_results.csv"
 
 
 def categorize_tool_calls(
@@ -201,7 +208,7 @@ async def main():
                 "timestamp": run_timestamp,
                 "passed": False,
                 "assertions_passed": 0,
-                "assertions_total": 11,
+                "assertions_total": ASSERTIONS_TOTAL,
                 "metrics_count": 0,
                 "benchmarks_found": "",
                 "tokens": 0,
@@ -213,6 +220,9 @@ async def main():
                 "execute_calls": 0,
                 "execute_errors": 0,
                 "error_message": "",
+                "llm_time_ms": 0.0,
+                "tool_time_ms": 0.0,
+                "turns": 0,
             }
 
             try:
@@ -229,6 +239,12 @@ async def main():
                     # Get conversation metrics
                     summary = ConversationSummary(messages=eval_agent.message_history)
                     row["conversation_span_ms"] = summary.conversation_span_ms
+                    row["llm_time_ms"] = round(summary.total_elapsed_time_ms, 2)
+                    # Tool time is whatever is left in the wall-clock span after LLM time
+                    row["tool_time_ms"] = round(
+                        max(summary.conversation_span_ms - row["llm_time_ms"], 0.0), 2
+                    )
+                    row["turns"] = summary.user_message_count
 
                     # Get tool call metrics
                     row["tool_calls"] = summary.tool_calls
