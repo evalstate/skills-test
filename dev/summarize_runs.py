@@ -155,17 +155,37 @@ def _load_session_info(session_dir: Path) -> SessionInfo:
     )
 
 
+def load_run_metadata(run_folder: Path) -> dict[str, object]:
+    metadata_path = run_folder / "run_metadata.json"
+    if not metadata_path.exists():
+        return {}
+    try:
+        return json.loads(metadata_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _session_roots(run_folder: Path) -> list[Path]:
+    return [
+        run_folder / "sessions",
+        run_folder / ".fast-agent" / "sessions",
+        run_folder.parent / "sessions" / run_folder.name,
+    ]
+
+
 def resolve_session_info(run_folder: Path) -> Optional[SessionInfo]:
-    sessions_root = run_folder / ".fast-agent" / "sessions"
-    if not sessions_root.exists():
-        return None
+    for sessions_root in _session_roots(run_folder):
+        if not sessions_root.exists():
+            continue
 
-    session_dirs = [p for p in sessions_root.iterdir() if p.is_dir()]
-    if not session_dirs:
-        return None
+        session_dirs = [p for p in sessions_root.iterdir() if p.is_dir()]
+        if not session_dirs:
+            continue
 
-    session_dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-    return _load_session_info(session_dirs[0])
+        session_dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        return _load_session_info(session_dirs[0])
+
+    return None
 
 
 def resolve_history_path(run_folder: Path) -> Optional[Path]:
@@ -288,10 +308,15 @@ def summarize_runs(runs_folder: Path, output_path: Path, output_filename: str) -
                     expected_metrics=EXPECTED_METRICS,
                 )
 
+            run_metadata = load_run_metadata(run_folder)
+            model_name = run_metadata.get("model")
+            if not isinstance(model_name, str):
+                model_name = ""
+
             row = {
                 "batch_id": batch_id,
                 "run_number": run_number,
-                "model": "",
+                "model": model_name,
                 "timestamp": session_info.created_at if session_info else "",
                 "passed": validation.passed,
                 "assertions_passed": validation.assertions_passed,
