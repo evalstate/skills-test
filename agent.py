@@ -5,23 +5,41 @@ Evaluation runner with iteration support and CSV metrics tracking.
 
 import argparse
 import asyncio
+import contextlib
 import csv
+import os
 import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from fast_agent import FastAgent, ConversationSummary
+from fast_agent import ConversationSummary, FastAgent
 from fast_agent.mcp.prompts.prompt_load import load_prompt
-from fast_agent.mcp.prompt_serialization import save_messages
+from fast_agent.session import get_session_manager
 from test_eval_assertions import (
     ASSERTIONS_TOTAL,
-    validate_with_metrics,
     ValidationResult,
+    validate_with_metrics,
 )
 
-# Create the application
-fast = FastAgent("fast-agent example", ignore_unknown_args=True)
+ROOT_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = ROOT_DIR / "fastagent.config.yaml"
+PROMPT_SOURCE = ROOT_DIR / "build_olmo_yaml.md"
+AGENTS_SOURCE = ROOT_DIR / "AGENTS.md"
+SKILLS_REPO_URL = "https://github.com/huggingface/skills.git"
+SKILLS_REPO_COMMIT = "fe044dc129e33aca7c2edc0084f02a7119b4109f"
+SKILL_NAMES = (
+    "hugging-face-evaluation",
+    "hugging-face-evaluation-manager",
+)
+SKILL_MANIFEST_CANDIDATES = [
+    Path("skills") / "hugging-face-evaluation" / "SKILL.md",
+    Path("hf_model_evaluation")
+    / "skills"
+    / "hugging-face-evaluation-manager"
+    / "SKILL.md",
+    Path("hf_model_evaluation") / "skills" / "hugging-face-evaluation" / "SKILL.md",
+]
 
 # CSV fieldnames for results tracking
 FIELDNAMES = [
@@ -46,10 +64,12 @@ FIELDNAMES = [
     "llm_time_ms",
     "tool_time_ms",
     "turns",
+    "session_id",
+    "session_history_file",
 ]
 
 # Stable CSV path for accumulating results across batches
-CSV_PATH = Path("runs") / "regraded_results.csv"
+CSV_PATH = ROOT_DIR / "runs" / "regraded_results.csv"
 
 
 def categorize_tool_calls(
@@ -87,7 +107,8 @@ def categorize_tool_calls(
         "execute_errors": execute_errors,
     }
 
-# Files to exclude when collecting artifacts
+
+# Files to exclude when copying artifacts into run workspaces
 EXCLUDE_FILES = {
     "agent.py",
     "test_eval_assertions.py",
@@ -108,29 +129,137 @@ default_instruction = """You are a helpful AI Agent.
 The current date is {{currentDate}}."""
 
 
-def reset_skills_repo() -> None:
-    """Reset the skills repository to a clean state."""
-    skills_path = Path("../skills").resolve()
-    print(f"Resetting skills repo at {skills_path}...")
-    subprocess.run(["git", "checkout", "."], cwd=skills_path, check=True, capture_output=True)
-    subprocess.run(["git", "clean", "-fd"], cwd=skills_path, check=True, capture_output=True)
-    print("Skills repo reset complete.")
+@contextlib.contextmanager
+def run_in_workspace(path: Path):
+    """Temporarily change the working directory to the given path."""
+    original = Path.cwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(original)
 
 
-def collect_artifacts(run_folder: Path) -> list[str]:
-    """Move generated .py and .yaml files to the run folder.
+def copy_prompt_assets(workspace: Path) -> None:
+    """Copy prompt inputs needed by the agent into the workspace."""
+    if not PROMPT_SOURCE.exists():
+        raise FileNotFoundError(f"Prompt source missing: {PROMPT_SOURCE}")
+    if not AGENTS_SOURCE.exists():
+        raise FileNotFoundError(f"AGENTS.md missing: {AGENTS_SOURCE}")
+    workspace.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(PROMPT_SOURCE, workspace / PROMPT_SOURCE.name)
+    shutil.copy2(AGENTS_SOURCE, workspace / AGENTS_SOURCE.name)
 
-    Returns list of moved file names.
-    """
-    moved_files = []
-    for pattern in ["*.yaml", "*.py"]:
-        for f in Path(".").glob(pattern):
-            if f.name in EXCLUDE_FILES:
-                continue
-            dest = run_folder / f.name
-            shutil.move(str(f), str(dest))
-            moved_files.append(f.name)
-    return moved_files
+
+def _clone_skills_repo(destination: Path) -> None:
+    if destination.exists():
+        shutil.rmtree(destination)
+
+    subprocess.run(
+        ["git", "clone", "--no-checkout", SKILLS_REPO_URL, str(destination)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(destination), "checkout", SKILLS_REPO_COMMIT],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _find_skill_manifest(skills_repo_dir: Path) -> Path:
+    for candidate in SKILL_MANIFEST_CANDIDATES:
+        manifest = skills_repo_dir / candidate
+        if manifest.exists():
+            return manifest
+
+    for manifest in skills_repo_dir.rglob("SKILL.md"):
+        try:
+            content = manifest.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for name in SKILL_NAMES:
+            if f"name: {name}" in content or f'name: "{name}"' in content:
+                return manifest
+
+    candidates_text = "\n".join(f"- {candidate}" for candidate in SKILL_MANIFEST_CANDIDATES)
+    raise FileNotFoundError(
+        "Expected skill manifest not found in cloned skills repo. "
+        f"Checked candidates:\n{candidates_text}\n"
+        f"Repo: {SKILLS_REPO_URL}"
+    )
+
+
+def copy_skills_repo(destination: Path) -> Path:
+    """Clone the skills repo at the pinned commit into a per-run destination."""
+    _clone_skills_repo(destination)
+    return _find_skill_manifest(destination)
+
+
+def prepare_skills_directory(
+    manifest_path: Path,
+    destination: Path,
+) -> Path:
+    """Create a filtered skills directory containing only the target skill."""
+    if destination.exists():
+        shutil.rmtree(destination)
+
+    skill_dir = manifest_path.parent
+    target_dir = destination / skill_dir.name
+    ignore = shutil.ignore_patterns(".git", ".venv", "__pycache__")
+    shutil.copytree(skill_dir, target_dir, ignore=ignore)
+    return destination
+
+
+def copy_skill_runtime_assets(skill_dir: Path, workspace: Path) -> None:
+    """Copy skill scripts into the workspace so relative paths resolve."""
+    scripts_dir = skill_dir / "scripts"
+    if not scripts_dir.exists():
+        return
+    target = workspace / "scripts"
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.copytree(scripts_dir, target)
+
+
+def _recover_output_file(
+    workspace: Path,
+    skills_repo_dir: Path,
+    output_filename: str,
+) -> None:
+    target = workspace / output_filename
+    if target.exists():
+        return
+
+    candidates = list(skills_repo_dir.rglob(output_filename))
+    if not candidates:
+        return
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(candidates[0], target)
+
+
+def build_fast_agent(environment_dir: Path, skills_manifest_dir: Path) -> FastAgent:
+    """Create a fast-agent  instance configured for a single run."""
+    fast = FastAgent(
+        "fast-agent example",
+        ignore_unknown_args=True,
+        config_path=str(CONFIG_PATH),
+        environment_dir=environment_dir,
+        skills_directory=[skills_manifest_dir],
+    )
+
+    @fast.agent(
+        name="eval_skill",
+        servers=["huggingface"],
+        instruction=default_instruction,
+    )
+    async def eval_skill():
+        return None
+
+    return fast
 
 
 def parse_args() -> argparse.Namespace:
@@ -152,13 +281,6 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-# Define the agent
-@fast.agent(
-    name="eval_skill",
-    skills=["../skills/"],
-    servers=["huggingface"],
-    instruction=default_instruction,
-)
 async def main():
     args = parse_args()
     num_runs = args.runs
@@ -166,7 +288,7 @@ async def main():
 
     # Create timestamped batch folder for artifacts
     batch_id = datetime.now().strftime("%Y_%m_%d_%H_%M")
-    batch_folder = Path("runs") / batch_id
+    batch_folder = (ROOT_DIR / "runs" / batch_id).resolve()
     batch_folder.mkdir(parents=True, exist_ok=True)
 
     # Check if CSV exists (to determine if we need to write header)
@@ -190,15 +312,18 @@ async def main():
             print(f"\n--- Run {i}/{num_runs} ---")
             run_timestamp = datetime.now().isoformat()
 
-            # Reset skills repo before each run
-            try:
-                reset_skills_repo()
-            except subprocess.CalledProcessError as e:
-                print(f"Warning: Failed to reset skills repo: {e}")
-
             # Create run subfolder
             run_folder = batch_folder / f"run_{i}"
             run_folder.mkdir(exist_ok=True)
+            workspace = (run_folder / "workspace").resolve()
+            env_dir = (run_folder / ".fast-agent").resolve()
+            skills_repo_dir = (run_folder / "skills_repo").resolve()
+            skills_filtered_dir = (run_folder / "skills_filtered").resolve()
+
+            copy_prompt_assets(workspace)
+            manifest_path = copy_skills_repo(skills_repo_dir)
+            skills_manifest_dir = prepare_skills_directory(manifest_path, skills_filtered_dir)
+            copy_skill_runtime_assets(manifest_path.parent, workspace)
 
             # Initialize row with defaults
             row = {
@@ -223,14 +348,30 @@ async def main():
                 "llm_time_ms": 0.0,
                 "tool_time_ms": 0.0,
                 "turns": 0,
+                "session_id": "",
+                "session_history_file": "",
             }
 
             try:
+                fast = build_fast_agent(env_dir, skills_manifest_dir)
                 async with fast.run() as agent:
+
                     eval_agent = agent.eval_skill
-#                    await agent.interactive()
-                    # Run the evaluation task
-                    await eval_agent.generate(load_prompt(Path("build_olmo_yaml.md")))
+                    manager = get_session_manager()
+                    session = manager.create_session(
+                        metadata={
+                            "batch_id": batch_id,
+                            "run_number": i,
+                            "output_file": output_filename,
+                        }
+                    )
+                    row["session_id"] = session.info.name
+
+                    with run_in_workspace(workspace):
+                        # Run the evaluation task
+                        prompt_path = Path(PROMPT_SOURCE.name)
+                        await agent.interactive()
+                        await eval_agent.generate(load_prompt(prompt_path))
 
                     # Get model name
                     model_name = eval_agent.llm.model_name
@@ -264,12 +405,14 @@ async def main():
                     if eval_agent.llm.usage_accumulator:
                         row["tokens"] = eval_agent.llm.usage_accumulator.cumulative_billing_tokens
 
-                    # Save conversation history
-                    history_file = run_folder / "conversation.json"
-                    save_messages(eval_agent.message_history, str(history_file))
+                    history_path = session.latest_history_path(eval_agent.name)
+                    if history_path:
+                        row["session_history_file"] = str(history_path)
+
+                _recover_output_file(workspace, skills_repo_dir, output_filename)
 
                 # Validate the output file
-                output_path = Path(output_filename)
+                output_path = workspace / output_filename
                 validation: ValidationResult = validate_with_metrics(output_path)
 
                 row["passed"] = validation.passed
@@ -280,16 +423,26 @@ async def main():
                 row["error_message"] = validation.error_message or ""
 
                 status = "PASSED" if validation.passed else "FAILED"
-                print(f"Run {i}: {status} ({validation.assertions_passed}/{validation.assertions_total} assertions)")
+                print(
+                    f"Run {i}: {status} ("
+                    f"{validation.assertions_passed}/{validation.assertions_total} assertions)"
+                )
 
             except Exception as e:
                 row["error_message"] = str(e)
                 print(f"Run {i}: ERROR - {e}")
 
-            # Collect artifacts (move generated files to run folder)
-            moved = collect_artifacts(run_folder)
+            # Copy any extra artifacts created outside the workspace (rare)
+            moved = []
+            for pattern in ["*.yaml", "*.py"]:
+                for f in Path(".").glob(pattern):
+                    if f.name in EXCLUDE_FILES:
+                        continue
+                    dest = run_folder / f.name
+                    shutil.move(str(f), str(dest))
+                    moved.append(f.name)
             if moved:
-                print(f"Collected artifacts: {moved}")
+                print(f"Collected artifacts from repo root: {moved}")
 
             # Write row to CSV and flush
             writer.writerow(row)

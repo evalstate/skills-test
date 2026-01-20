@@ -17,7 +17,7 @@ Extract evaluation benchmark scores from the Hugging Face model "allenai/OLMo-7B
    - winogrande
    - mmlu
    - truthfulqa
-3. Save the output in valid model-index YAML format to `olmo_7b_evaluations.yaml`
+3. Save the output in valid model-index YAML format to `olmo_7b_evaluations.yaml` in the current working directory
 4. Do NOT include training hyperparameters, model architecture specs, or random baseline scores
 5. Include the source attribution pointing to the model README
 

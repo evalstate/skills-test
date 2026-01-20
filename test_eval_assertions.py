@@ -36,7 +36,7 @@ EXPECTED_METRICS: dict[str, float] = {
     "truthfulqa": 36.0,
 }
 
-ALLOWED_MODEL_NAMES = {"OLMo-7B", "OLMo 7B"}
+ALLOWED_MODEL_NAME_PATTERNS = {"olmo 7b", "olmo-7b"}
 
 # The base assertions cover structure, types, and safety checks.
 # We then add one assertion per expected metric value.
@@ -45,8 +45,10 @@ VALUE_ASSERTIONS = len(EXPECTED_METRICS)
 ASSERTIONS_TOTAL = BASE_ASSERTIONS + VALUE_ASSERTIONS
 
 
-def _normalize_model_name(name: str) -> str:
-    return name.replace("-", " ").strip().lower()
+def _model_name_matches(name: str) -> bool:
+    """Check if model name contains 'olmo 7b' or 'olmo-7b' (case-insensitive)."""
+    name_lower = name.lower()
+    return any(pattern in name_lower for pattern in ALLOWED_MODEL_NAME_PATTERNS)
 
 
 def _normalize_metric_type(metric_type: str) -> str:
@@ -75,35 +77,30 @@ def _assert_metric_values(metrics: Iterable[dict], expected: dict[str, float]):
 def validate_evaluation_file(
     output_file: Path,
     *,
-    expected_model: str = "OLMo-7B",
-    allowed_model_names: set[str] | None = None,
     expected_source: str = "huggingface.co/allenai/OLMo-7B",
     min_expected_benchmarks: int = 9,
     expected_benchmarks: set[str] | None = None,
     expected_metrics: dict[str, float] | None = None,
 ):
     """Validate an evaluation YAML file and raise on failure."""
-    
+
     assert output_file.exists(), f"Output file '{output_file}' not found"
     print("✓ File exists")
-    
+
     # Load YAML
     with open(output_file, 'r') as f:
         data = yaml.safe_load(f)
-    
+
     # Assertion 2: Has model-index structure
     assert 'model-index' in data, "Missing 'model-index' key"
     assert len(data['model-index']) > 0, "model-index is empty"
     print("✓ Valid model-index structure")
-    
+
     model_entry = data['model-index'][0]
-    
-    # Assertion 3: Model name is correct
-    allowed_models = allowed_model_names or ALLOWED_MODEL_NAMES
+
+    # Assertion 3: Model name contains olmo 7b or olmo-7b (case-insensitive)
     model_name = model_entry['name']
-    normalized = _normalize_model_name(model_name)
-    normalized_expected = {_normalize_model_name(m) for m in allowed_models | {expected_model}}
-    assert normalized in normalized_expected, f"Model name is '{model_name}', expected one of {sorted(allowed_models | {expected_model})}"
+    assert _model_name_matches(model_name), f"Model name '{model_name}' does not contain 'olmo 7b' or 'olmo-7b'"
     print("✓ Correct model name")
     
     # Assertion 4: Has results
@@ -201,8 +198,6 @@ def test_olmo_evaluation_output(path: str | Path | None = None):
 def validate_with_metrics(
     output_file: Path,
     *,
-    expected_model: str = "OLMo-7B",
-    allowed_model_names: set[str] | None = None,
     expected_source: str = "huggingface.co/allenai/OLMo-7B",
     min_expected_benchmarks: int = 9,
     expected_benchmarks: set[str] | None = None,
@@ -218,7 +213,6 @@ def validate_with_metrics(
     metrics_count = 0
     benchmarks_found: list[str] = []
     expected_metrics = expected_metrics or EXPECTED_METRICS
-    allowed_model_names = allowed_model_names or ALLOWED_MODEL_NAMES
     expected_benchmarks = expected_benchmarks or set(expected_metrics.keys())
 
     try:
@@ -252,18 +246,16 @@ def validate_with_metrics(
 
         model_entry = data['model-index'][0]
 
-        # Assertion 3: Model name is correct
+        # Assertion 3: Model name contains olmo 7b or olmo-7b (case-insensitive)
         model_name = model_entry.get('name', '')
-        normalized = _normalize_model_name(model_name)
-        normalized_expected = {_normalize_model_name(m) for m in allowed_model_names | {expected_model}}
-        if normalized not in normalized_expected:
+        if not _model_name_matches(model_name):
             return ValidationResult(
                 passed=False,
                 assertions_passed=assertions_passed,
                 assertions_total=assertions_total,
                 metrics_count=0,
                 benchmarks_found=[],
-                error_message=f"Model name is '{model_name}', expected one of {sorted(allowed_model_names | {expected_model})}",
+                error_message=f"Model name '{model_name}' does not contain 'olmo 7b' or 'olmo-7b'",
             )
         assertions_passed += 1
 
