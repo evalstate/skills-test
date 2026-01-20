@@ -20,11 +20,12 @@ mcp_timeline:
   steps: 20 # number of timeline buckets to render
   step_seconds: 15 # seconds per bucket (accepts values like "45s", "2m")
 
-#shell_execution:
+shell_execution:
 # length of time before terminating subprocess
 #  timeout_seconds: 20
 # warning interval if no output seen
 #  warning_seconds: 5
+  show_bash: false
 
 # Logging and Console Configuration:
 logger:
@@ -35,10 +36,12 @@ logger:
   # Switch the progress display on or off
   progress_display: true
   # Show chat User/Assistant messages on the console
-  show_chat: true
+  show_chat: false
   # Show tool calls on the console
-  show_tools: true
+  show_tools: false
   # Truncate long tool responses on the console
+  # don't show truncated bash outputs
+
   truncate_tools: true
   # Streaming renderer for assistant responses: "markdown", "plain", or "none"
   streaming: markdown

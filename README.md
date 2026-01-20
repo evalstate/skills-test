@@ -2,34 +2,38 @@
 
 ## overview
 
-contains a simple path to run the model card stats yaml path in the llm eval skill.
+This repo drives a simple evaluation loop for the model card stats YAML path in the
+`hugging-face-evaluation-manager` skill.
 
-without the instrumentation, agent is:
+The evaluation prompt triggers the skill and writes a YAML file with benchmark scores,
+then assertions are checked in `test_eval_assertions.py`.
 
-```python
+To generate a CSV summary from run artifacts, use:
 
-@fast.agent(
-    name="eval_skill",
-    skills=["../skills/"],
-    servers=["huggingface"],
-    instruction=default_instruction,
-)
-
-await eval_agent.generate(load_prompt(Path("build_olmo_yaml.md")))
-
+```bash
+python dev/summarize_runs.py
 ```
-
-This prompt triggers the skill and asks for a YAML file containing the model benchmarks. The output is asserted with `test_eval_assertions.py` and recorded in `runs.csv`.
 
 ![](./runs-skill-v1/pass_rate_by_model.png)
 
-Some notes and known limitations:
+## what changed vs the original runner
 
- - The skills repo is reset after each run in case an agent pollutes the directory
- - We don't keep this directory clean, so there is potential for interference or discovering previous run data.
- - The HF MCP Server is included in context with the `skills` bouquet - so model/dataset search, repo details, jobs and docs are made available.
- - AGENTS.md is used to inform the agent that `uv` is in use, and that huggingface_hub is installed. The `.venv` isn't reset every time either, so one run installing a heavy package will pay a time penalty - might be worth checking if that's a concern.
- - To check that, all the conversations are easily parseable/grepable. 
- - The results were *regraded* to take in to account specific benchmark metric assertions. That script is in the `dev` folder for reference.
- - For the first run (and probably for the next few) I kept the markdown streaming renderer on for observation, so that may have a small impact on the timings. But that's the reason for the runs :) 
- - **WARNING** Make sure you commit changes to the skill folder _before_ running a test...
+- Each run now executes inside its own **workspace** under `runs/<batch>/run_<n>/workspace`.
+- Each run gets a **fresh skills copy** under `runs/<batch>/run_<n>/skills` to prevent agents
+  from discovering prior outputs.
+- Session history is enabled and persisted per run in
+  `runs/<batch>/run_<n>/.fast-agent/sessions/<session_id>/history_*.json`.
+- `dev/regrade_runs.py` now prefers session history for timing + turn analysis, with
+  fallback to legacy `conversation.json` if present.
+
+## notes and known limitations
+
+- The skills repo is copied per run (no global reset needed).
+- We keep the working directory clean by scoping artifacts to the per-run workspace.
+- The HF MCP Server is included in context with the `skills` bouquet, so model/dataset
+  search, repo details, jobs and docs are available.
+- `AGENTS.md` is copied into each workspace to indicate `uv` usage and dependencies.
+- For the first run (and probably for the next few) the markdown streaming renderer
+  may have a small impact on timings — that’s part of the observation baseline.
+- **WARNING:** Make sure you commit changes to the skills repo _before_ running a test,
+  since each run snapshots the current state.
